@@ -1,0 +1,471 @@
+import bpy
+import math
+from mathutils import Vector
+
+# ============================================================
+# LIMPAR CENA
+# ============================================================
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+# ============================================================
+# MATERIAIS
+# ============================================================
+
+def criar_material(nome, cor, alpha=1.0, transparente=False):
+    mat = bpy.data.materials.new(nome)
+    mat.diffuse_color = cor
+
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+
+    if bsdf:
+        if "Base Color" in bsdf.inputs:
+            bsdf.inputs["Base Color"].default_value = cor
+        if "Alpha" in bsdf.inputs:
+            bsdf.inputs["Alpha"].default_value = alpha
+        if "Roughness" in bsdf.inputs:
+            bsdf.inputs["Roughness"].default_value = 0.45
+
+    if transparente:
+        mat.blend_method = 'BLEND'
+        mat.show_transparent_back = True
+
+    return mat
+
+
+mat_nitrogenio = criar_material("Nitrogênio azul", (0.05, 0.25, 1.0, 1.0))
+mat_hidrogenio = criar_material("Hidrogênio verde", (0.0, 0.85, 0.1, 1.0))
+mat_ligacao = criar_material("Ligação cinza", (0.65, 0.65, 0.65, 1.0))
+
+mat_referencia = criar_material(
+    "Referência transparente",
+    (0.9, 0.9, 0.9, 0.18),
+    alpha=0.18,
+    transparente=True
+)
+
+mat_seta = criar_material("Setas amarelas", (1.0, 0.82, 0.05, 1.0))
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+def criar_esfera(nome, posicao, raio, material):
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=64,
+        ring_count=32,
+        radius=raio,
+        location=posicao
+    )
+    obj = bpy.context.object
+    obj.name = nome
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_cilindro_unitario(nome, raio, material):
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=48,
+        radius=raio,
+        depth=1.0,
+        location=(0, 0, 0)
+    )
+
+    obj = bpy.context.object
+    obj.name = nome
+    obj.rotation_mode = 'QUATERNION'
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def posicionar_cilindro_entre_pontos(obj, p1, p2):
+    p1 = Vector(p1)
+    p2 = Vector(p2)
+
+    meio = (p1 + p2) / 2
+    direcao = p2 - p1
+    comprimento = direcao.length
+
+    obj.location = meio
+
+    if comprimento > 0:
+        obj.rotation_quaternion = direcao.to_track_quat('Z', 'Y')
+
+    obj.scale = (1, 1, comprimento)
+
+
+def criar_cilindro_entre_pontos(nome, p1, p2, raio, material):
+    obj = criar_cilindro_unitario(nome, raio, material)
+    posicionar_cilindro_entre_pontos(obj, p1, p2)
+    return obj
+
+
+def criar_cone_alinhado(nome, ponta, direcao, raio, profundidade, material):
+    direcao = Vector(direcao).normalized()
+    ponta = Vector(ponta)
+
+    centro = ponta - direcao * (profundidade / 2)
+
+    bpy.ops.mesh.primitive_cone_add(
+        vertices=48,
+        radius1=raio,
+        radius2=0,
+        depth=profundidade,
+        location=centro
+    )
+
+    obj = bpy.context.object
+    obj.name = nome
+    obj.rotation_euler = direcao.to_track_quat('Z', 'Y').to_euler()
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_seta(nome, inicio, fim, raio, material):
+    inicio = Vector(inicio)
+    fim = Vector(fim)
+    direcao = fim - inicio
+
+    if direcao.length == 0:
+        return []
+
+    direcao = direcao.normalized()
+
+    profundidade_cone = 0.35
+    raio_cone = 0.16
+
+    fim_cilindro = fim - direcao * profundidade_cone
+
+    haste = criar_cilindro_entre_pontos(
+        nome + " haste",
+        inicio,
+        fim_cilindro,
+        raio,
+        material
+    )
+
+    cone = criar_cone_alinhado(
+        nome + " ponta",
+        fim,
+        direcao,
+        raio_cone,
+        profundidade_cone,
+        material
+    )
+
+    return [haste, cone]
+
+
+def olhar_para(obj, alvo):
+    direcao = Vector(alvo) - obj.location
+    obj.rotation_euler = direcao.to_track_quat('-Z', 'Y').to_euler()
+
+
+def key_visibilidade(obj, visivel, frame):
+    obj.hide_viewport = not visivel
+    obj.hide_render = not visivel
+    obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+    obj.keyframe_insert(data_path="hide_render", frame=frame)
+
+
+def key_visibilidade_lista(lista, visivel, frame):
+    for obj in lista:
+        key_visibilidade(obj, visivel, frame)
+
+
+def key_esfera(obj, frame):
+    obj.keyframe_insert(data_path="location", frame=frame)
+
+
+def key_cilindro(obj, frame):
+    obj.keyframe_insert(data_path="location", frame=frame)
+    obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
+    obj.keyframe_insert(data_path="scale", frame=frame)
+
+# ============================================================
+# GEOMETRIA DA AMÔNIA
+# ============================================================
+
+# Convenção:
+# eixo z = eixo C3
+# N fica acima
+# os três H formam uma base triangular abaixo
+
+N_eq = Vector((0, 0, 0.75))
+
+raio_H = 1.55
+z_H = -0.45
+
+phis_H = [
+    math.radians(90),
+    math.radians(210),
+    math.radians(330)
+]
+
+direcoes_radiais = [
+    Vector((math.cos(phi), math.sin(phi), 0))
+    for phi in phis_H
+]
+
+H_eq = [
+    Vector((raio_H * math.cos(phi), raio_H * math.sin(phi), z_H))
+    for phi in phis_H
+]
+
+# Comprimento N-H e ângulo inicial da ligação com o eixo vertical
+L_NH = (H_eq[0] - N_eq).length
+beta_eq = math.atan2(raio_H, N_eq.z - z_H)
+
+# ============================================================
+# MOLÉCULA PRINCIPAL
+# ============================================================
+
+nitrogenio = criar_esfera("Nitrogênio", N_eq, 0.52, mat_nitrogenio)
+
+hidrogenios = [
+    criar_esfera(f"Hidrogênio {i+1}", H_eq[i], 0.34, mat_hidrogenio)
+    for i in range(3)
+]
+
+ligacoes = [
+    criar_cilindro_entre_pontos(
+        f"Ligação N-H {i+1}",
+        N_eq,
+        H_eq[i],
+        0.11,
+        mat_ligacao
+    )
+    for i in range(3)
+]
+
+# ============================================================
+# MOLÉCULA DE REFERÊNCIA TRANSPARENTE
+# ============================================================
+
+N_ref = criar_esfera("Nitrogênio referência", N_eq, 0.53, mat_referencia)
+
+H_ref = [
+    criar_esfera(f"Hidrogênio referência {i+1}", H_eq[i], 0.35, mat_referencia)
+    for i in range(3)
+]
+
+L_ref = [
+    criar_cilindro_entre_pontos(
+        f"Ligação referência {i+1}",
+        N_eq,
+        H_eq[i],
+        0.055,
+        mat_referencia
+    )
+    for i in range(3)
+]
+
+objetos_referencia = [N_ref] + H_ref + L_ref
+
+# ============================================================
+# SETAS DA FLEXÃO SIMÉTRICA
+# ============================================================
+
+# Para phi > 0:
+# a pirâmide abre: os H vão para fora e um pouco para cima.
+# o N desce um pouco.
+
+objetos_setas = []
+
+for i in range(3):
+    direcao_H = (
+        math.cos(beta_eq) * direcoes_radiais[i]
+        + math.sin(beta_eq) * Vector((0, 0, 1))
+    ).normalized()
+
+    objetos_setas += criar_seta(
+        f"Seta H{i+1}",
+        H_eq[i] + 0.08 * direcao_H,
+        H_eq[i] + 0.75 * direcao_H,
+        0.045,
+        mat_seta
+    )
+
+# seta pequena do nitrogênio para baixo
+objetos_setas += criar_seta(
+    "Seta N",
+    N_eq + Vector((0, 0, -0.08)),
+    N_eq + Vector((0, 0, -0.55)),
+    0.035,
+    mat_seta
+)
+
+# ============================================================
+# LUZ E CÂMERA
+# ============================================================
+
+bpy.ops.object.light_add(type='AREA', location=(4.5, -5.5, 7.0))
+luz = bpy.context.object
+luz.name = "Luz principal"
+luz.data.energy = 900
+luz.data.size = 5.5
+
+bpy.ops.object.light_add(type='POINT', location=(-4.0, 4.0, 4.0))
+luz_fill = bpy.context.object
+luz_fill.name = "Luz de preenchimento"
+luz_fill.data.energy = 130
+
+bpy.ops.object.camera_add(location=(5.4, -7.0, 4.2))
+camera = bpy.context.object
+camera.name = "Câmera principal"
+bpy.context.scene.camera = camera
+
+olhar_para(camera, (0, 0, 0.55))
+
+camera.data.type = 'ORTHO'
+camera.data.ortho_scale = 5.9
+
+# ============================================================
+# CONFIGURAÇÃO DA CENA
+# ============================================================
+
+scene = bpy.context.scene
+scene.frame_start = 1
+scene.frame_end = 520
+scene.render.fps = 24
+
+scene.render.resolution_x = 1280
+scene.render.resolution_y = 720
+
+bpy.context.scene.world.color = (0.02, 0.02, 0.02)
+
+# ============================================================
+# VISIBILIDADE INICIAL
+# ============================================================
+
+key_visibilidade_lista(objetos_referencia, False, 1)
+key_visibilidade_lista(objetos_setas, False, 1)
+
+key_visibilidade_lista(objetos_referencia, True, 35)
+key_visibilidade_lista(objetos_setas, True, 35)
+
+# ============================================================
+# FUNÇÃO DO MODO NORMAL: FLEXÃO SIMÉTRICA
+# ============================================================
+
+def aplicar_flexao_simetrica(phi, frame):
+    """
+    phi > 0:
+        a pirâmide abre, os H se afastam lateralmente
+        e sobem um pouco em relação ao N.
+
+    phi < 0:
+        a pirâmide fecha, os H se aproximam lateralmente
+        e descem um pouco em relação ao N.
+
+    As ligações N-H são mantidas aproximadamente constantes.
+    """
+
+    massa_H = 1.0
+    massa_N = 14.0
+
+    # Para apresentação, deixa o movimento do N visível.
+    # Para algo mais físico, use 1.0.
+    exagero_nitrogenio = 2.5
+
+    beta = beta_eq + phi
+
+    H_rel = []
+
+    for i in range(3):
+        pos_rel = (
+            L_NH * math.sin(beta) * direcoes_radiais[i]
+            + Vector((0, 0, -L_NH * math.cos(beta)))
+        )
+        H_rel.append(pos_rel)
+
+    H_rel_eq = [
+        H_eq[i] - N_eq
+        for i in range(3)
+    ]
+
+    deslocamentos_relativos_H = [
+        H_rel[i] - H_rel_eq[i]
+        for i in range(3)
+    ]
+
+    soma_deslocamentos_H = (
+        deslocamentos_relativos_H[0]
+        + deslocamentos_relativos_H[1]
+        + deslocamentos_relativos_H[2]
+    )
+
+    # Mantém o centro de massa aproximadamente fixo:
+    # (mN + 3mH)dN + mH(dH1+dH2+dH3) = 0
+    dN = -exagero_nitrogenio * (massa_H / (massa_N + 3 * massa_H)) * soma_deslocamentos_H
+
+    N_pos = N_eq + dN
+
+    H_pos = [
+        N_pos + H_rel[i]
+        for i in range(3)
+    ]
+
+    nitrogenio.location = N_pos
+
+    for i in range(3):
+        hidrogenios[i].location = H_pos[i]
+        posicionar_cilindro_entre_pontos(ligacoes[i], N_pos, H_pos[i])
+
+    key_esfera(nitrogenio, frame)
+
+    for i in range(3):
+        key_esfera(hidrogenios[i], frame)
+        key_cilindro(ligacoes[i], frame)
+
+# ============================================================
+# ANIMAÇÃO
+# ============================================================
+
+# Pausa inicial
+aplicar_flexao_simetrica(0.0, 1)
+aplicar_flexao_simetrica(0.0, 45)
+
+# Vibração
+amplitude_angular = math.radians(9.0)
+
+frame_inicio = 50
+frame_fim = 500
+
+numero_de_ciclos = 5
+passos = 150
+
+for i in range(passos + 1):
+    t = i / passos
+    frame = int(frame_inicio + t * (frame_fim - frame_inicio))
+
+    fase = 2 * math.pi * numero_de_ciclos * t
+    phi = amplitude_angular * math.sin(fase)
+
+    aplicar_flexao_simetrica(phi, frame)
+
+# Volta ao equilíbrio
+aplicar_flexao_simetrica(0.0, 510)
+aplicar_flexao_simetrica(0.0, 520)
+
+# ============================================================
+# INTERPOLAÇÃO SUAVE
+# ============================================================
+
+for action in bpy.data.actions:
+    for fcurve in action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = 'BEZIER'
+
+# ============================================================
+# FINAL
+# ============================================================
+
+scene.frame_set(1)
+
+print("Animação criada: flexão simétrica da amônia, modo guarda-chuva, sem textos.")
