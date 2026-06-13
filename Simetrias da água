@@ -1,0 +1,480 @@
+import bpy
+import math
+from mathutils import Vector
+
+# ============================================================
+# LIMPAR CENA
+# ============================================================
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+# ============================================================
+# MATERIAIS
+# ============================================================
+
+def criar_material(nome, cor, alpha=1.0, transparente=False):
+    mat = bpy.data.materials.new(nome)
+    mat.diffuse_color = cor
+
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = cor
+        bsdf.inputs["Alpha"].default_value = alpha
+        bsdf.inputs["Roughness"].default_value = 0.45
+
+    if transparente:
+        mat.blend_method = 'BLEND'
+        mat.show_transparent_back = True
+
+    return mat
+
+
+mat_oxigenio = criar_material("Oxigênio vermelho", (1.0, 0.0, 0.0, 1.0))
+mat_hidrogenio = criar_material("Hidrogênio verde", (0.0, 0.85, 0.1, 1.0))
+mat_ligacao = criar_material("Ligação cinza", (0.65, 0.65, 0.65, 1.0))
+
+mat_eixo = criar_material("Eixo C2 azul", (0.1, 0.35, 1.0, 1.0))
+
+mat_plano_xz = criar_material(
+    "Plano xz roxo transparente",
+    (0.65, 0.25, 1.0, 0.24),
+    alpha=0.24,
+    transparente=True
+)
+
+mat_plano_yz = criar_material(
+    "Plano yz ciano transparente",
+    (0.0, 0.8, 1.0, 0.22),
+    alpha=0.22,
+    transparente=True
+)
+
+mat_borda_xz = criar_material("Borda plano xz", (0.8, 0.45, 1.0, 1.0))
+mat_borda_yz = criar_material("Borda plano yz", (0.0, 0.9, 1.0, 1.0))
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+def criar_esfera(nome, posicao, raio, material):
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=64,
+        ring_count=32,
+        radius=raio,
+        location=posicao
+    )
+    obj = bpy.context.object
+    obj.name = nome
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_cilindro_entre_pontos(nome, p1, p2, raio, material):
+    p1 = Vector(p1)
+    p2 = Vector(p2)
+
+    meio = (p1 + p2) / 2
+    direcao = p2 - p1
+    comprimento = direcao.length
+
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=48,
+        radius=raio,
+        depth=comprimento,
+        location=meio
+    )
+
+    obj = bpy.context.object
+    obj.name = nome
+    obj.rotation_euler = direcao.to_track_quat('Z', 'Y').to_euler()
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_cone(nome, posicao, raio, profundidade, material):
+    bpy.ops.mesh.primitive_cone_add(
+        vertices=48,
+        radius1=raio,
+        radius2=0,
+        depth=profundidade,
+        location=posicao
+    )
+    obj = bpy.context.object
+    obj.name = nome
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_plano_retangular(nome, vertices, material):
+    mesh = bpy.data.meshes.new(nome + "Mesh")
+    mesh.from_pydata(vertices, [], [(0, 1, 2, 3)])
+    mesh.update()
+
+    obj = bpy.data.objects.new(nome, mesh)
+    bpy.context.collection.objects.link(obj)
+    obj.data.materials.append(material)
+    return obj
+
+
+def criar_borda_retangulo(nome, vertices, raio, material):
+    bordas = []
+    pares = [
+        (vertices[0], vertices[1]),
+        (vertices[1], vertices[2]),
+        (vertices[2], vertices[3]),
+        (vertices[3], vertices[0]),
+    ]
+
+    for i, (p1, p2) in enumerate(pares):
+        obj = criar_cilindro_entre_pontos(
+            f"{nome} borda {i+1}",
+            p1,
+            p2,
+            raio,
+            material
+        )
+        bordas.append(obj)
+
+    return bordas
+
+
+def olhar_para(obj, alvo):
+    direcao = Vector(alvo) - obj.location
+    obj.rotation_euler = direcao.to_track_quat('-Z', 'Y').to_euler()
+
+
+def key_visibilidade(obj, visivel, frame):
+    obj.hide_viewport = not visivel
+    obj.hide_render = not visivel
+    obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+    obj.keyframe_insert(data_path="hide_render", frame=frame)
+
+
+def key_visibilidade_lista(lista, visivel, frame):
+    for obj in lista:
+        key_visibilidade(obj, visivel, frame)
+
+
+def key_transform(obj, frame, loc=False, rot=True, scale=True):
+    if loc:
+        obj.keyframe_insert(data_path="location", frame=frame)
+    if rot:
+        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+    if scale:
+        obj.keyframe_insert(data_path="scale", frame=frame)
+
+# ============================================================
+# GEOMETRIA DA MOLÉCULA DE ÁGUA
+# ============================================================
+
+# Convenção:
+# eixo z = eixo C2
+# plano yz = plano da molécula
+# plano xz = plano que troca os hidrogênios
+
+O = (0, 0, 0)
+
+angulo_HOH = math.radians(104.5)
+dist_OH = 2.0
+meio_angulo = angulo_HOH / 2
+
+H1 = (
+    0,
+    dist_OH * math.sin(meio_angulo),
+    dist_OH * math.cos(meio_angulo)
+)
+
+H2 = (
+    0,
+    -dist_OH * math.sin(meio_angulo),
+    dist_OH * math.cos(meio_angulo)
+)
+
+# ============================================================
+# CRIAR MOLÉCULA
+# ============================================================
+
+oxigenio = criar_esfera("Oxigênio", O, 0.55, mat_oxigenio)
+hidrogenio_1 = criar_esfera("Hidrogênio 1", H1, 0.35, mat_hidrogenio)
+hidrogenio_2 = criar_esfera("Hidrogênio 2", H2, 0.35, mat_hidrogenio)
+
+ligacao_1 = criar_cilindro_entre_pontos("Ligação O-H 1", O, H1, 0.12, mat_ligacao)
+ligacao_2 = criar_cilindro_entre_pontos("Ligação O-H 2", O, H2, 0.12, mat_ligacao)
+
+objetos_molecula = [
+    oxigenio,
+    hidrogenio_1,
+    hidrogenio_2,
+    ligacao_1,
+    ligacao_2
+]
+
+# Empty que controla a molécula inteira
+bpy.ops.object.empty_add(type='ARROWS', location=(0, 0, 0))
+controle_molecula = bpy.context.object
+controle_molecula.name = "Controle das simetrias da H2O"
+
+for obj in objetos_molecula:
+    obj.parent = controle_molecula
+
+# ============================================================
+# EIXO C2
+# ============================================================
+
+eixo_c2 = criar_cilindro_entre_pontos(
+    "Eixo C2",
+    (0, 0, -0.8),
+    (0, 0, 3.0),
+    0.045,
+    mat_eixo
+)
+
+seta_c2 = criar_cone(
+    "Seta eixo C2",
+    (0, 0, 3.25),
+    0.18,
+    0.45,
+    mat_eixo
+)
+
+objetos_eixo = [eixo_c2, seta_c2]
+
+# ============================================================
+# PLANOS DE SIMETRIA
+# ============================================================
+
+# Plano xz: y = 0
+# Esse plano troca H1 e H2.
+
+verts_xz = [
+    (-2.3, 0, -0.7),
+    (2.3, 0, -0.7),
+    (2.3, 0, 2.9),
+    (-2.3, 0, 2.9)
+]
+
+plano_xz = criar_plano_retangular("Plano xz", verts_xz, mat_plano_xz)
+bordas_xz = criar_borda_retangulo("Plano xz", verts_xz, 0.025, mat_borda_xz)
+
+# Plano yz: x = 0
+# Esse é o próprio plano da molécula.
+
+verts_yz = [
+    (0, -2.3, -0.7),
+    (0, 2.3, -0.7),
+    (0, 2.3, 2.9),
+    (0, -2.3, 2.9)
+]
+
+plano_yz = criar_plano_retangular("Plano yz", verts_yz, mat_plano_yz)
+bordas_yz = criar_borda_retangulo("Plano yz", verts_yz, 0.025, mat_borda_yz)
+
+objetos_plano_xz = [plano_xz] + bordas_xz
+objetos_plano_yz = [plano_yz] + bordas_yz
+objetos_planos = objetos_plano_xz + objetos_plano_yz
+
+# Controles dos planos para animação de surgimento
+bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, 0))
+controle_plano_xz = bpy.context.object
+controle_plano_xz.name = "Controle plano xz"
+
+bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, 0))
+controle_plano_yz = bpy.context.object
+controle_plano_yz.name = "Controle plano yz"
+
+for obj in objetos_plano_xz:
+    obj.parent = controle_plano_xz
+
+for obj in objetos_plano_yz:
+    obj.parent = controle_plano_yz
+
+# ============================================================
+# LUZ E CÂMERA
+# ============================================================
+
+bpy.ops.object.light_add(type='AREA', location=(4.5, -5.5, 7.0))
+luz = bpy.context.object
+luz.name = "Luz principal"
+luz.data.energy = 900
+luz.data.size = 5.5
+
+bpy.ops.object.light_add(type='POINT', location=(-4.0, 4.0, 4.0))
+luz_fill = bpy.context.object
+luz_fill.name = "Luz de preenchimento"
+luz_fill.data.energy = 120
+
+bpy.ops.object.camera_add(location=(5.2, -6.8, 4.2))
+camera = bpy.context.object
+camera.name = "Câmera principal"
+bpy.context.scene.camera = camera
+
+olhar_para(camera, (0, 0, 1.05))
+
+camera.data.type = 'ORTHO'
+camera.data.ortho_scale = 6.0
+
+# ============================================================
+# CONFIGURAÇÃO DA CENA
+# ============================================================
+
+scene = bpy.context.scene
+scene.frame_start = 1
+scene.frame_end = 390
+scene.render.fps = 24
+
+scene.render.resolution_x = 1280
+scene.render.resolution_y = 720
+
+bpy.context.scene.world.color = (0.02, 0.02, 0.02)
+
+# ============================================================
+# VISIBILIDADE INICIAL
+# ============================================================
+
+key_visibilidade_lista(objetos_eixo, False, 1)
+key_visibilidade_lista(objetos_planos, False, 1)
+
+# ============================================================
+# ANIMAÇÃO DA MOLÉCULA
+# ============================================================
+
+scene.frame_set(1)
+
+# Estado inicial
+controle_molecula.rotation_euler = (0, 0, 0)
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 1, rot=True, scale=True)
+
+# Pausa inicial
+controle_molecula.rotation_euler = (0, 0, 0)
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 70, rot=True, scale=True)
+
+# Rotação C2: 180 graus em torno do eixo z
+controle_molecula.rotation_euler = (0, 0, math.radians(180))
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 140, rot=True, scale=True)
+
+# Pausa depois da rotação
+controle_molecula.rotation_euler = (0, 0, math.radians(180))
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 170, rot=True, scale=True)
+
+# Reset visual
+controle_molecula.rotation_euler = (0, 0, 0)
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 171, rot=True, scale=True)
+
+# Pausa antes das reflexões
+controle_molecula.rotation_euler = (0, 0, 0)
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 230, rot=True, scale=True)
+
+# Reflexão no plano xz: y -> -y
+# Troca os dois hidrogênios.
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 240, rot=False, scale=True)
+
+controle_molecula.scale = (1, -1, 1)
+key_transform(controle_molecula, 285, rot=False, scale=True)
+
+# Pausa depois da reflexão no plano xz
+controle_molecula.scale = (1, -1, 1)
+key_transform(controle_molecula, 315, rot=False, scale=True)
+
+# Reset visual
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 316, rot=False, scale=True)
+
+# Reflexão no plano yz: x -> -x
+# Como a molécula está no plano yz, ela permanece igual.
+controle_molecula.scale = (1, 1, 1)
+key_transform(controle_molecula, 335, rot=False, scale=True)
+
+controle_molecula.scale = (-1, 1, 1)
+key_transform(controle_molecula, 370, rot=False, scale=True)
+
+# Pausa final
+controle_molecula.scale = (-1, 1, 1)
+key_transform(controle_molecula, 390, rot=False, scale=True)
+
+# ============================================================
+# ANIMAÇÃO DO EIXO C2 SURGINDO
+# ============================================================
+
+key_visibilidade_lista(objetos_eixo, False, 24)
+key_visibilidade_lista(objetos_eixo, True, 25)
+
+eixo_c2.scale = (1, 1, 0.001)
+seta_c2.scale = (0.001, 0.001, 0.001)
+key_transform(eixo_c2, 25, rot=False, scale=True)
+key_transform(seta_c2, 25, rot=False, scale=True)
+
+eixo_c2.scale = (1, 1, 1)
+seta_c2.scale = (1, 1, 1)
+key_transform(eixo_c2, 60, rot=False, scale=True)
+key_transform(seta_c2, 60, rot=False, scale=True)
+
+# ============================================================
+# ANIMAÇÃO DOS PLANOS SURGINDO
+# ============================================================
+
+controle_plano_xz.scale = (0.001, 0.001, 0.001)
+controle_plano_yz.scale = (0.001, 0.001, 0.001)
+
+key_transform(controle_plano_xz, 1, rot=False, scale=True)
+key_transform(controle_plano_yz, 1, rot=False, scale=True)
+
+key_visibilidade_lista(objetos_planos, False, 180)
+key_visibilidade_lista(objetos_planos, True, 181)
+
+controle_plano_xz.scale = (0.001, 0.001, 0.001)
+controle_plano_yz.scale = (0.001, 0.001, 0.001)
+
+key_transform(controle_plano_xz, 181, rot=False, scale=True)
+key_transform(controle_plano_yz, 181, rot=False, scale=True)
+
+controle_plano_xz.scale = (1, 1, 1)
+controle_plano_yz.scale = (1, 1, 1)
+
+key_transform(controle_plano_xz, 220, rot=False, scale=True)
+key_transform(controle_plano_yz, 220, rot=False, scale=True)
+
+# ============================================================
+# PEQUENO DESTAQUE NO PLANO yz DURANTE A ÚLTIMA REFLEXÃO
+# ============================================================
+
+# Como a reflexão no plano yz não muda a molécula visualmente,
+# o plano yz dá uma leve pulsada para indicar que a simetria está sendo aplicada.
+
+controle_plano_yz.scale = (1, 1, 1)
+key_transform(controle_plano_yz, 330, rot=False, scale=True)
+
+controle_plano_yz.scale = (1.12, 1.12, 1.12)
+key_transform(controle_plano_yz, 350, rot=False, scale=True)
+
+controle_plano_yz.scale = (1, 1, 1)
+key_transform(controle_plano_yz, 370, rot=False, scale=True)
+
+# ============================================================
+# INTERPOLAÇÃO LINEAR
+# ============================================================
+
+for action in bpy.data.actions:
+    for fcurve in action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = 'LINEAR'
+
+# ============================================================
+# FINAL
+# ============================================================
+
+scene.frame_set(1)
+
+print("Animação completa da água criada sem textos: eixo C2, rotação C2, planos e reflexões.")
