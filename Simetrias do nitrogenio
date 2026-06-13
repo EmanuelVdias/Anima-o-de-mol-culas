@@ -1,0 +1,724 @@
+import bpy
+import math
+from mathutils import Vector
+
+# ============================================================
+# LIMPAR CENA
+# ============================================================
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+# ============================================================
+# MATERIAIS
+# ============================================================
+
+def criar_material(nome, cor, alpha=1.0, transparente=False):
+    mat = bpy.data.materials.new(nome)
+    mat.diffuse_color = cor
+
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = cor
+        bsdf.inputs["Alpha"].default_value = alpha
+        bsdf.inputs["Roughness"].default_value = 0.45
+
+    if transparente:
+        mat.blend_method = 'BLEND'
+        mat.show_transparent_back = True
+
+    return mat
+
+
+mat_nitrogenio = criar_material("Nitrogênio azul", (0.05, 0.25, 1.0, 1.0))
+mat_hidrogenio = criar_material("Hidrogênio verde", (0.0, 0.85, 0.1, 1.0))
+mat_ligacao = criar_material("Ligação cinza", (0.65, 0.65, 0.65, 1.0))
+mat_eixo = criar_material("Eixo C3 azul", (0.1, 0.35, 1.0, 1.0))
+
+mat_plano_1 = criar_material("Plano sigma 1", (0.75, 0.25, 1.0, 0.23), 0.23, True)
+mat_plano_2 = criar_material("Plano sigma 2", (0.0, 0.85, 1.0, 0.22), 0.22, True)
+mat_plano_3 = criar_material("Plano sigma 3", (1.0, 0.75, 0.1, 0.22), 0.22, True)
+
+mat_borda_1 = criar_material("Borda sigma 1", (0.8, 0.45, 1.0, 1.0))
+mat_borda_2 = criar_material("Borda sigma 2", (0.0, 0.9, 1.0, 1.0))
+mat_borda_3 = criar_material("Borda sigma 3", (1.0, 0.8, 0.1, 1.0))
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+def criar_esfera(nome, posicao, raio, material):
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=64,
+        ring_count=32,
+        radius=raio,
+        location=posicao
+    )
+    obj = bpy.context.object
+    obj.name = nome
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_cilindro_entre_pontos(nome, p1, p2, raio, material):
+    p1 = Vector(p1)
+    p2 = Vector(p2)
+
+    meio = (p1 + p2) / 2
+    direcao = p2 - p1
+    comprimento = direcao.length
+
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=48,
+        radius=raio,
+        depth=comprimento,
+        location=meio
+    )
+
+    obj = bpy.context.object
+    obj.name = nome
+
+    if comprimento > 0:
+        obj.rotation_euler = direcao.to_track_quat('Z', 'Y').to_euler()
+
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_cone_alinhado(nome, ponta, direcao, raio, profundidade, material):
+    direcao = Vector(direcao).normalized()
+    ponta = Vector(ponta)
+
+    centro = ponta - direcao * (profundidade / 2)
+
+    bpy.ops.mesh.primitive_cone_add(
+        vertices=48,
+        radius1=raio,
+        radius2=0,
+        depth=profundidade,
+        location=centro
+    )
+
+    obj = bpy.context.object
+    obj.name = nome
+    obj.rotation_euler = direcao.to_track_quat('Z', 'Y').to_euler()
+    obj.data.materials.append(material)
+    bpy.ops.object.shade_smooth()
+    return obj
+
+
+def criar_plano_retangular(nome, vertices, material):
+    mesh = bpy.data.meshes.new(nome + "Mesh")
+    mesh.from_pydata(vertices, [], [(0, 1, 2, 3)])
+    mesh.update()
+
+    obj = bpy.data.objects.new(nome, mesh)
+    bpy.context.collection.objects.link(obj)
+    obj.data.materials.append(material)
+    return obj
+
+
+def criar_borda_retangulo(nome, vertices, raio, material):
+    bordas = []
+    pares = [
+        (vertices[0], vertices[1]),
+        (vertices[1], vertices[2]),
+        (vertices[2], vertices[3]),
+        (vertices[3], vertices[0]),
+    ]
+
+    for i, (p1, p2) in enumerate(pares):
+        bordas.append(
+            criar_cilindro_entre_pontos(
+                f"{nome} borda {i+1}",
+                p1,
+                p2,
+                raio,
+                material
+            )
+        )
+
+    return bordas
+
+
+def criar_plano_vertical_por_angulo(nome, phi, largura, z_min, z_max, mat_plano, mat_borda):
+    u = Vector((math.cos(phi), math.sin(phi), 0))
+
+    v1 = -largura * u + Vector((0, 0, z_min))
+    v2 =  largura * u + Vector((0, 0, z_min))
+    v3 =  largura * u + Vector((0, 0, z_max))
+    v4 = -largura * u + Vector((0, 0, z_max))
+
+    vertices = [v1, v2, v3, v4]
+
+    plano = criar_plano_retangular(nome, vertices, mat_plano)
+    bordas = criar_borda_retangulo(nome, vertices, 0.025, mat_borda)
+
+    return [plano] + bordas
+
+
+def olhar_para(obj, alvo):
+    direcao = Vector(alvo) - obj.location
+    obj.rotation_euler = direcao.to_track_quat('-Z', 'Y').to_euler()
+
+
+def key_visibilidade(obj, visivel, frame):
+    obj.hide_viewport = not visivel
+    obj.hide_render = not visivel
+    obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+    obj.keyframe_insert(data_path="hide_render", frame=frame)
+
+
+def key_visibilidade_lista(lista, visivel, frame):
+    for obj in lista:
+        key_visibilidade(obj, visivel, frame)
+
+
+def key_transform(obj, frame, loc=True, rot=True, scale=True):
+    if loc:
+        obj.keyframe_insert(data_path="location", frame=frame)
+    if rot:
+        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+    if scale:
+        obj.keyframe_insert(data_path="scale", frame=frame)
+
+
+def criar_empty(nome, tipo='PLAIN_AXES', posicao=(0, 0, 0)):
+    bpy.ops.object.empty_add(type=tipo, location=posicao)
+    obj = bpy.context.object
+    obj.name = nome
+    obj.rotation_mode = 'XYZ'
+    return obj
+
+# ============================================================
+# GEOMETRIA DO NH3
+# ============================================================
+
+N_eq = Vector((0, 0, 0.75))
+
+raio_H = 1.55
+z_H = -0.45
+
+phis_H = [
+    math.radians(90),
+    math.radians(210),
+    math.radians(330)
+]
+
+H_eq = [
+    Vector((raio_H * math.cos(phi), raio_H * math.sin(phi), z_H))
+    for phi in phis_H
+]
+
+# ============================================================
+# RIG ESTÁVEL DA MOLÉCULA
+# ============================================================
+
+# A hierarquia é:
+# reflexao_outer -> reflexao_scale -> molecula_empty -> átomos e ligações
+#
+# Para rotações C3, só animamos molecula_empty.rotation_euler.z.
+# Para reflexões, usamos:
+# R(phi) * escala_y * R(-phi)
+#
+# Isso evita girar cilindros individualmente.
+
+reflexao_outer = criar_empty("Reflexão - rotação do plano")
+reflexao_scale = criar_empty("Reflexão - escala local")
+molecula_empty = criar_empty("Molécula NH3")
+
+reflexao_scale.parent = reflexao_outer
+molecula_empty.parent = reflexao_scale
+
+# ============================================================
+# CRIAR MOLÉCULA
+# ============================================================
+
+nitrogenio = criar_esfera("Nitrogênio", N_eq, 0.52, mat_nitrogenio)
+
+hidrogenios = [
+    criar_esfera(f"Hidrogênio {i+1}", H_eq[i], 0.34, mat_hidrogenio)
+    for i in range(3)
+]
+
+ligacoes = [
+    criar_cilindro_entre_pontos(f"Ligação N-H {i+1}", N_eq, H_eq[i], 0.11, mat_ligacao)
+    for i in range(3)
+]
+
+objetos_molecula = [nitrogenio] + hidrogenios + ligacoes
+
+for obj in objetos_molecula:
+    obj.parent = molecula_empty
+
+# ============================================================
+# EIXO C3
+# ============================================================
+
+controle_eixo = criar_empty("Controle eixo C3")
+
+eixo_c3 = criar_cilindro_entre_pontos(
+    "Eixo C3",
+    (0, 0, -1.15),
+    (0, 0, 2.45),
+    0.045,
+    mat_eixo
+)
+
+seta_c3 = criar_cone_alinhado(
+    "Seta eixo C3",
+    (0, 0, 2.85),
+    (0, 0, 1),
+    0.18,
+    0.45,
+    mat_eixo
+)
+
+objetos_eixo = [eixo_c3, seta_c3]
+
+for obj in objetos_eixo:
+    obj.parent = controle_eixo
+
+# ============================================================
+# PLANOS sigma_v
+# ============================================================
+
+objetos_plano_1 = criar_plano_vertical_por_angulo(
+    "Plano sigma v 1",
+    phis_H[0],
+    largura=2.35,
+    z_min=-1.10,
+    z_max=2.25,
+    mat_plano=mat_plano_1,
+    mat_borda=mat_borda_1
+)
+
+objetos_plano_2 = criar_plano_vertical_por_angulo(
+    "Plano sigma v 2",
+    phis_H[1],
+    largura=2.35,
+    z_min=-1.10,
+    z_max=2.25,
+    mat_plano=mat_plano_2,
+    mat_borda=mat_borda_2
+)
+
+objetos_plano_3 = criar_plano_vertical_por_angulo(
+    "Plano sigma v 3",
+    phis_H[2],
+    largura=2.35,
+    z_min=-1.10,
+    z_max=2.25,
+    mat_plano=mat_plano_3,
+    mat_borda=mat_borda_3
+)
+
+controle_plano_1 = criar_empty("Controle plano sigma 1")
+controle_plano_2 = criar_empty("Controle plano sigma 2")
+controle_plano_3 = criar_empty("Controle plano sigma 3")
+
+for obj in objetos_plano_1:
+    obj.parent = controle_plano_1
+
+for obj in objetos_plano_2:
+    obj.parent = controle_plano_2
+
+for obj in objetos_plano_3:
+    obj.parent = controle_plano_3
+
+objetos_planos = objetos_plano_1 + objetos_plano_2 + objetos_plano_3
+
+# ============================================================
+# LUZ E CÂMERA
+# ============================================================
+
+bpy.ops.object.light_add(type='AREA', location=(4.5, -5.5, 7.0))
+luz = bpy.context.object
+luz.name = "Luz principal"
+luz.data.energy = 900
+luz.data.size = 5.5
+
+bpy.ops.object.light_add(type='POINT', location=(-4.0, 4.0, 4.0))
+luz_fill = bpy.context.object
+luz_fill.name = "Luz de preenchimento"
+luz_fill.data.energy = 130
+
+bpy.ops.object.camera_add(location=(5.4, -7.0, 4.2))
+camera = bpy.context.object
+camera.name = "Câmera principal"
+bpy.context.scene.camera = camera
+
+olhar_para(camera, (0, 0, 0.55))
+
+camera.data.type = 'ORTHO'
+camera.data.ortho_scale = 5.9
+
+# ============================================================
+# CONFIGURAÇÃO DA CENA
+# ============================================================
+
+scene = bpy.context.scene
+scene.frame_start = 1
+scene.frame_end = 430
+scene.render.fps = 24
+
+scene.render.resolution_x = 1280
+scene.render.resolution_y = 720
+
+bpy.context.scene.world.color = (0.02, 0.02, 0.02)
+
+# ============================================================
+# FUNÇÕES DE ANIMAÇÃO
+# ============================================================
+
+def key_rig(frame):
+    key_transform(reflexao_outer, frame, loc=False, rot=True, scale=False)
+    key_transform(reflexao_scale, frame, loc=False, rot=False, scale=True)
+    key_transform(molecula_empty, frame, loc=False, rot=True, scale=False)
+
+
+def estado_identidade(frame):
+    reflexao_outer.rotation_euler = (0, 0, 0)
+    reflexao_scale.scale = (1, 1, 1)
+    molecula_empty.rotation_euler = (0, 0, 0)
+    key_rig(frame)
+
+
+def estado_rotacao_c3(theta, frame):
+    reflexao_outer.rotation_euler = (0, 0, 0)
+    reflexao_scale.scale = (1, 1, 1)
+    molecula_empty.rotation_euler = (0, 0, theta)
+    key_rig(frame)
+
+
+def estado_reflexao(phi, s, frame):
+    # Transformação total:
+    # R(phi) * escala_y(s) * R(-phi)
+    #
+    # Quando s = 1, a molécula fica igual.
+    # Quando s = -1, temos a reflexão no plano vertical de ângulo phi.
+
+    reflexao_outer.rotation_euler = (0, 0, phi)
+    reflexao_scale.scale = (1, s, 1)
+    molecula_empty.rotation_euler = (0, 0, -phi)
+    key_rig(frame)
+
+
+def animar_rotacao(theta_ini, theta_fim, frame_ini, frame_fim, passos=36):
+    for i in range(passos + 1):
+        t = i / passos
+        frame = int(frame_ini + t * (frame_fim - frame_ini))
+        theta = theta_ini + t * (theta_fim - theta_ini)
+        estado_rotacao_c3(theta, frame)
+
+
+def animar_reflexao(phi, frame_ini, frame_fim, passos=24):
+    for i in range(passos + 1):
+        t = i / passos
+        frame = int(frame_ini + t * (frame_fim - frame_ini))
+
+        # s vai de 1 até -1
+        s = 1 - 2 * t
+        estado_reflexao(phi, s, frame)
+
+# ============================================================
+# VISIBILIDADE INICIAL
+# ============================================================
+
+key_visibilidade_lista(objetos_eixo, False, 1)
+key_visibilidade_lista(objetos_planos, False, 1)
+
+controle_eixo.scale = (0.001, 0.001, 0.001)
+controle_plano_1.scale = (0.001, 0.001, 0.001)
+controle_plano_2.scale = (0.001, 0.001, 0.001)
+controle_plano_3.scale = (0.001, 0.001, 0.001)
+
+key_transform(controle_eixo, 1, loc=False, rot=False, scale=True)
+key_transform(controle_plano_1, 1, loc=False, rot=False, scale=True)
+key_transform(controle_plano_2, 1, loc=False, rot=False, scale=True)
+key_transform(controle_plano_3, 1, loc=False, rot=False, scale=True)
+
+# ============================================================
+# ANIMAÇÃO DA MOLÉCULA
+# ============================================================
+
+# Identidade E
+estado_identidade(1)
+estado_identidade(45)
+
+# Rotação C3: 120 graus
+animar_rotacao(
+    theta_ini=0,
+    theta_fim=math.radians(120),
+    frame_ini=70,
+    frame_fim=130,
+    passos=36
+)
+
+estado_rotacao_c3(math.radians(120), 150)
+
+# Rotação C3²: 240 graus
+animar_rotacao(
+    theta_ini=math.radians(120),
+    theta_fim=math.radians(240),
+    frame_ini=160,
+    frame_fim=220,
+    passos=36
+)
+
+estado_rotacao_c3(math.radians(240), 240)
+
+# Reset invisível
+estado_identidade(241)
+estado_identidade(260)
+
+# Reflexão no plano sigma_v 1
+estado_reflexao(phis_H[0], 1, 261)
+animar_reflexao(
+    phi=phis_H[0],
+    frame_ini=270,
+    frame_fim=310,
+    passos=24
+)
+
+estado_reflexao(phis_H[0], -1, 325)
+
+# Reset invisível
+estado_identidade(326)
+
+# Reflexão no plano sigma_v 2
+estado_reflexao(phis_H[1], 1, 327)
+animar_reflexao(
+    phi=phis_H[1],
+    frame_ini=335,
+    frame_fim=365,
+    passos=24
+)
+
+estado_reflexao(phis_H[1], -1, 375)
+
+# Reset invisível
+estado_identidade(376)
+
+# Reflexão no plano sigma_v 3
+estado_reflexao(phis_H[2], 1, 377)
+animar_reflexao(
+    phi=phis_H[2],
+    frame_ini=385,
+    frame_fim=415,
+    passos=24
+)
+
+estado_reflexao(phis_H[2], -1, 430)
+
+# ============================================================
+# ANIMAÇÃO DO EIXO C3 SURGINDO
+# ============================================================
+
+key_visibilidade_lista(objetos_eixo, False, 24)
+key_visibilidade_lista(objetos_eixo, True, 25)
+
+controle_eixo.scale = (0.001, 0.001, 0.001)
+key_transform(controle_eixo, 25, loc=False, rot=False, scale=True)
+
+controle_eixo.scale = (1, 1, 1)
+key_transform(controle_eixo, 60, loc=False, rot=False, scale=True)
+
+# ============================================================
+# ANIMAÇÃO DOS PLANOS sigma_v
+# ============================================================
+
+# Plano 1
+key_visibilidade_lista(objetos_plano_1, False, 250)
+key_visibilidade_lista(objetos_plano_1, True, 251)
+
+controle_plano_1.scale = (0.001, 0.001, 0.001)
+key_transform(controle_plano_1, 251, loc=False, rot=False, scale=True)
+
+controle_plano_1.scale = (1, 1, 1)
+key_transform(controle_plano_1, 265, loc=False, rot=False, scale=True)
+
+controle_plano_1.scale = (1.12, 1.12, 1.12)
+key_transform(controle_plano_1, 290, loc=False, rot=False, scale=True)
+
+controle_plano_1.scale = (1, 1, 1)
+key_transform(controle_plano_1, 310, loc=False, rot=False, scale=True)
+
+# Plano 2
+key_visibilidade_lista(objetos_plano_2, False, 320)
+key_visibilidade_lista(objetos_plano_2, True, 321)
+
+controle_plano_2.scale = (0.001, 0.001, 0.001)
+key_transform(controle_plano_2, 321, loc=False, rot=False, scale=True)
+
+controle_plano_2.scale = (1, 1, 1)
+key_transform(controle_plano_2, 334, loc=False, rot=False, scale=True)
+
+controle_plano_2.scale = (1.12, 1.12, 1.12)
+key_transform(controle_plano_2, 350, loc=False, rot=False, scale=True)
+
+controle_plano_2.scale = (1, 1, 1)
+key_transform(controle_plano_2, 365, loc=False, rot=False, scale=True)
+
+# Plano 3
+key_visibilidade_lista(objetos_plano_3, False, 370)
+key_visibilidade_lista(objetos_plano_3, True, 371)
+
+controle_plano_3.scale = (0.001, 0.001, 0.001)
+key_transform(controle_plano_3, 371, loc=False, rot=False, scale=True)
+
+controle_plano_3.scale = (1, 1, 1)
+key_transform(controle_plano_3, 384, loc=False, rot=False, scale=True)
+
+controle_plano_3.scale = (1.12, 1.12, 1.12)
+key_transform(controle_plano_3, 400, loc=False, rot=False, scale=True)
+
+controle_plano_3.scale = (1, 1, 1)
+key_transform(controle_plano_3, 415, loc=False, rot=False, scale=True)
+
+# ============================================================
+# INTERPOLAÇÃO LINEAR PARA EVITAR GIROS ESTRANHOS
+# ============================================================
+
+for action in bpy.data.actions:
+    for fcurve in action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = 'LINEAR'
+
+# ============================================================
+# FINAL
+# ============================================================
+
+scene.frame_set(1)
+
+print("Animação estável criada: elementos de simetria do NH3, grupo C3v.")
+
+
+# ============================================================
+# ANIMAÇÃO DA CÂMERA
+# ============================================================
+
+def posicionar_camera(frame, posicao, alvo=(0, 0, 0.55), ortho_scale=5.7):
+    scene.frame_set(frame)
+
+    camera.location = Vector(posicao)
+    olhar_para(camera, alvo)
+
+    camera.data.ortho_scale = ortho_scale
+
+    camera.keyframe_insert(data_path="location", frame=frame)
+    camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+    camera.data.keyframe_insert(data_path="ortho_scale", frame=frame)
+
+
+def camera_para_plano_sigma(phi, distancia=7.0, altura=3.6, deslocamento_lateral=0.65):
+    """
+    Retorna uma posição de câmera quase de frente para um plano sigma_v.
+
+    O plano sigma_v contém:
+        - o eixo z;
+        - a direção radial de ângulo phi.
+
+    A câmera fica aproximadamente na direção normal ao plano,
+    com um pequeno deslocamento lateral para manter profundidade visual.
+    """
+
+    normal = Vector((-math.sin(phi), math.cos(phi), 0)).normalized()
+    direcao_plano = Vector((math.cos(phi), math.sin(phi), 0)).normalized()
+
+    pos = distancia * normal + deslocamento_lateral * direcao_plano + Vector((0, 0, altura))
+
+    return pos
+
+
+# Visão geral para identidade e rotações C3
+posicionar_camera(
+    frame=1,
+    posicao=(5.4, -7.0, 4.2),
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.9
+)
+
+posicionar_camera(
+    frame=240,
+    posicao=(5.4, -7.0, 4.2),
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.9
+)
+
+# Aproxima para o primeiro plano sigma_v
+pos_camera_sigma_1 = camera_para_plano_sigma(phis_H[0])
+
+posicionar_camera(
+    frame=255,
+    posicao=pos_camera_sigma_1,
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.45
+)
+
+posicionar_camera(
+    frame=325,
+    posicao=pos_camera_sigma_1,
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.45
+)
+
+# Move para o segundo plano sigma_v
+pos_camera_sigma_2 = camera_para_plano_sigma(phis_H[1])
+
+posicionar_camera(
+    frame=334,
+    posicao=pos_camera_sigma_2,
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.45
+)
+
+posicionar_camera(
+    frame=375,
+    posicao=pos_camera_sigma_2,
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.45
+)
+
+# Move para o terceiro plano sigma_v
+pos_camera_sigma_3 = camera_para_plano_sigma(phis_H[2])
+
+posicionar_camera(
+    frame=384,
+    posicao=pos_camera_sigma_3,
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.45
+)
+
+posicionar_camera(
+    frame=430,
+    posicao=pos_camera_sigma_3,
+    alvo=(0, 0, 0.55),
+    ortho_scale=5.45
+)
+
+# ============================================================
+# INTERPOLAÇÃO
+# ============================================================
+
+# Mantém a molécula e os planos em interpolação linear,
+# evitando giros estranhos.
+for action in bpy.data.actions:
+    for fcurve in action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = 'LINEAR'
+
+# Deixa apenas a câmera com movimento mais suave.
+if camera.animation_data and camera.animation_data.action:
+    for fcurve in camera.animation_data.action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = 'BEZIER'
+
+if camera.data.animation_data and camera.data.animation_data.action:
+    for fcurve in camera.data.animation_data.action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = 'BEZIER'
